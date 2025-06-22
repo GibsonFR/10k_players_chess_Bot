@@ -213,7 +213,7 @@ const BotUI = {
         onOffContainer.style.marginBottom = "12px";
         onOffContainer.style.display = "flex";
         onOffContainer.style.alignItems = "center";
-        onOffContainer.style.gap = "8px";
+        onOffContainer.style.gap = "12px";
 
         const onOffLabel = document.createElement("label");
         onOffLabel.textContent = "Bot Active:";
@@ -229,6 +229,7 @@ const BotUI = {
         onOffContainer.appendChild(onOffLabel);
         onOffContainer.appendChild(onOffCheckbox);
         menu.appendChild(onOffContainer);
+
 
         // Status message container
         const statusDiv = document.createElement("div");
@@ -353,10 +354,12 @@ const BotController = {
     prevPositions: new Map(),
 
     async BotLoop() {
+
         if (!window.botActive) {
             setTimeout(() => this.BotLoop(), 500);
             return;
         }
+
 
         const kingPos = BotGameLogic.FindKingPosition();
         if (!kingPos) {
@@ -369,6 +372,8 @@ const BotController = {
 
         const kingMoves = BotGameLogic.GetLegalMoves(kx, ky);
         const kingInDanger = BotGameLogic.IsSquareDangerous(kx, ky);
+
+        const enemyPriority = { 6: 1, 5: 2, 4: 3, 3: 4, 2: 5, 1: 6 };
 
         if (kingInDanger) {
 
@@ -412,24 +417,12 @@ const BotController = {
    
             const safeMoves = kingMoves.filter(([x, y]) => !BotGameLogic.IsSquareDangerous(x, y));
 
-            // Trouver les captures possibles non défendues
             const captureMoves = kingMoves.filter(([x, y]) => {
                 if (!BotGameLogic.IsEnemy(x, y)) return false;
 
-                let defended = false;
-                for (let ax = 0; ax < boardW; ax++) {
-                    for (let ay = 0; ay < boardH; ay++) {
-                        if (BotGameLogic.IsAlly(ax, ay) && !(ax === kx && ay === ky)) {
-                            const allyMoves = BotGameLogic.GetLegalMoves(ax, ay);
-                            if (allyMoves.some(([mx, my]) => mx === x && my === y)) {
-                                defended = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (defended) break;
-                }
-                return !defended;
+                const defendedByEnemy = this.IsEnemyPieceDefended(x, y);
+
+                return !defendedByEnemy; 
             });
 
             if (safeMoves.length > 0) {
@@ -451,7 +444,7 @@ const BotController = {
             }
 
             for (const threat of threateningEnemies) {
-                const path = this.GetPathBetween(threat.x, threat.y, kx, ky);
+                const path = GetPathBetween(threat.x, threat.y, kx, ky);
 
                 for (const [bx, by] of path) {
                     if (board[bx][by] === 0) {
@@ -532,6 +525,24 @@ const BotController = {
 
         for (let x = 0; x < boardW; x++) {
             for (let y = 0; y < boardH; y++) {
+                if (!BotGameLogic.IsAlly(x, y)) continue;
+                if (BotGameLogic.GetPieceType(x, y) === 6) continue; // Exclure roi
+                if (BotGameLogic.IsInsideKingRealm(x, y, kx, ky)) continue; // Ignore pièces dans royaume
+
+                const moves = BotGameLogic.GetLegalMoves(x, y);
+                for (const [mx, my] of moves) {
+                    if (BotGameLogic.IsEnemy(mx, my)) {
+                        BotUI.UpdateActionStatus(`Ally piece at (${x},${y}) captures enemy at (${mx},${my}) outside kingdom`);
+                        BotController.SendMove(x, y, mx, my);
+                        await BotUtility.Sleep(25);
+                        return this.BotLoop();
+                    }
+                }
+            }
+        }
+
+        for (let x = 0; x < boardW; x++) {
+            for (let y = 0; y < boardH; y++) {
                 if (BotGameLogic.IsAlly(x, y)) {
                     const pieceType = BotGameLogic.GetPieceType(x, y);
                     if (pieceType === 6) continue;
@@ -578,15 +589,51 @@ const BotController = {
         }
 
         if (alliesOtherThanKing.length === 0) {
-
             const kingPos = BotGameLogic.FindKingPosition();
             if (kingPos) {
                 const kingMoves = BotGameLogic.GetLegalMoves(kingPos.x, kingPos.y);
+
                 for (const move of kingMoves) {
                     const [mx, my] = move;
-                    if (BotGameLogic.IsEnemy(mx, my) || BotGameLogic.IsNeutralPiece(mx, my)) {
-                        BotUI.UpdateActionStatus(`King at (${kingPos.x}, ${kingPos.y}) captures at (${mx}, ${my})`);
+                    if (BotGameLogic.IsEnemy(mx, my)) {
+                        const isDefended = BotController.IsEnemyPieceDefended(mx, my);
+                        if (isDefended) continue;  
+
+                        BotUI.UpdateActionStatus(`King at (${kingPos.x}, ${kingPos.y}) captures undefended enemy at (${mx}, ${my})`);
                         BotController.SendMove(kingPos.x, kingPos.y, mx, my);
+                        await BotUtility.Sleep(25);
+                        return this.BotLoop();
+                    } else if (BotGameLogic.IsNeutralPiece(mx, my)) {
+                        BotUI.UpdateActionStatus(`King at (${kingPos.x}, ${kingPos.y}) captures neutral piece at (${mx}, ${my})`);
+                        BotController.SendMove(kingPos.x, kingPos.y, mx, my);
+                        await BotUtility.Sleep(25);
+                        return this.BotLoop();
+                    }
+                }
+
+
+                let targets = [];
+                for (let x = 0; x < boardW; x++) {
+                    for (let y = 0; y < boardH; y++) {
+                        if ((BotGameLogic.IsEnemy(x, y) || BotGameLogic.IsNeutralPiece(x, y)) && BotGameLogic.IsInsideKingRealm(x, y, kingPos.x, kingPos.y)) {
+                            targets.push([x, y]);
+                        }
+                    }
+                }
+
+                if (targets.length > 0) {
+
+                    targets.sort((a, b) => BotUtility.MaxDistance(kingPos.x, kingPos.y, a[0], a[1]) - BotUtility.MaxDistance(kingPos.x, kingPos.y, b[0], b[1]));
+                    const closestTarget = targets[0];
+
+                    const movesCloser = kingMoves.filter(([mx, my]) =>
+                        BotUtility.MaxDistance(mx, my, closestTarget[0], closestTarget[1]) < BotUtility.MaxDistance(kingPos.x, kingPos.y, closestTarget[0], closestTarget[1])
+                    );
+
+                    if (movesCloser.length > 0) {
+                        const move = movesCloser[0];
+                        BotUI.UpdateActionStatus(`King at (${kingPos.x}, ${kingPos.y}) moves closer to target at (${closestTarget[0]}, ${closestTarget[1]})`);
+                        BotController.SendMove(kingPos.x, kingPos.y, move[0], move[1]);
                         await BotUtility.Sleep(25);
                         return this.BotLoop();
                     }
@@ -594,10 +641,17 @@ const BotController = {
             }
         }
 
+
         const targetsEnemy = [];
         for (let x = 0; x < boardW; x++) {
             for (let y = 0; y < boardH; y++) {
-                if (BotGameLogic.IsEnemy(x, y) && BotUtility.MaxDistance(x, y, kingPos.x, kingPos.y) <= range) {
+                if (!BotGameLogic.IsEnemy(x, y)) continue;
+                if (BotUtility.MaxDistance(x, y, kingPos.x, kingPos.y) > range) continue;
+
+
+                const targetPieceType = BotGameLogic.GetPieceType(x, y);
+
+                if (targetPieceType !== 3) {
                     targetsEnemy.push([x, y]);
                 }
             }
@@ -630,13 +684,33 @@ const BotController = {
             return (x + y) % 2 === 0;
         }
 
+        function getPathBetween(x1, y1, x2, y2) {
+            const path = [];
+            const dx = Math.sign(x2 - x1);
+            const dy = Math.sign(y2 - y1);
+            let cx = x1 + dx;
+            let cy = y1 + dy;
+            while (cx !== x2 || cy !== y2) {
+                path.push([cx, cy]);
+                if (cx !== x2) cx += dx;
+                if (cy !== y2) cy += dy;
+            }
+            return path;
+        }
+
         function neutralMoveApproachesEnemy(mx, my) {
             for (const [tx, ty] of targets) {
-                if (BotUtility.MaxDistance(mx, my, tx, ty) <= range && BotGameLogic.IsEnemy(tx, ty)) {
-                    return true;
+                const path = getPathBetween(mx, my, tx, ty);
+                for (const [px, py] of path) {
+                    if (BotGameLogic.IsNeutralPiece(px, py)) {
+                        return { blocked: true, blockPos: [px, py] };
+                    }
+                }
+                if (BotGameLogic.IsEnemy(tx, ty)) {
+                    return { blocked: false };
                 }
             }
-            return false;
+            return { blocked: false };
         }
 
         for (let x = 0; x < boardW; x++) {
@@ -651,9 +725,12 @@ const BotController = {
 
                 for (const [mx, my] of moves) {
 
-                    if (pieceType === 3 && isLightSquare(x, y) !== isLightSquare(mx, my)) continue;
+                    if (pieceType === 3 && isLightSquare(x, y) !== isLightSquare(mx, my)) continue;  
 
-                    if (targets.some(([tx, ty]) => tx === mx && ty === my)) {
+                    if (targets.some(([tx, ty]) => {
+                        if (pieceType === 3 && isLightSquare(x, y) !== isLightSquare(tx, ty)) return false;
+                        return tx === mx && ty === my;
+                    })) {
                         captureMoves.push({
                             pieceX: x,
                             pieceY: y,
@@ -667,22 +744,33 @@ const BotController = {
                         const targetPiece = BotGameLogic.GetPieceType(mx, my);
 
                         if (targetPiece === 0) {
-                            if (neutralMoveApproachesEnemy(mx, my)) {
-                                captureMoves.push({
-                                    pieceX: x,
-                                    pieceY: y,
-                                    moveX: mx,
-                                    moveY: my,
-                                    pieceType,
-                                    targetX: mx,
-                                    targetY: my,
-                                });
+                            const approachCheck = neutralMoveApproachesEnemy(mx, my);
+                            if (approachCheck.blocked) {
+                                const bx = approachCheck.blockPos[0];
+                                const by = approachCheck.blockPos[1];
+                                if (moves.some(([lx, ly]) => lx === bx && ly === by) && BotGameLogic.IsNeutralPiece(bx, by)) {
+                                    approachMoves.push({
+                                        pieceX: x,
+                                        pieceY: y,
+                                        moveX: bx,
+                                        moveY: by,
+                                        pieceType,
+                                        closestDist: BotUtility.MaxDistance(mx, my, bx, by),
+                                        bestPriority: 0
+                                    });
+                                }
                             } else {
+                                let bestPriority = 100;
                                 let closestDist = Infinity;
                                 for (const [tx, ty] of targets) {
-                                    const dist = BotUtility.MaxDistance(mx, my, tx, ty);
-                                    if (dist < closestDist) closestDist = dist;
+                                    if (BotGameLogic.IsEnemy(tx, ty)) {
+                                        const dist = BotUtility.MaxDistance(mx, my, tx, ty);
+                                        const enemyType = BotGameLogic.GetPieceType(tx, ty);
+                                        bestPriority = enemyPriority[enemyType] || 100;
+                                        if (dist < closestDist) closestDist = dist;
+                                    }
                                 }
+
                                 approachMoves.push({
                                     pieceX: x,
                                     pieceY: y,
@@ -690,6 +778,7 @@ const BotController = {
                                     moveY: my,
                                     pieceType,
                                     closestDist,
+                                    bestPriority,
                                 });
                             }
                         }
@@ -714,14 +803,29 @@ const BotController = {
         const filteredApproachMoves = approachMoves.filter(move => {
             const key = `${move.pieceX},${move.pieceY}`;
             const prevPos = this.prevPositions.get(key);
+
             if (prevPos && prevPos[0] === move.moveX && prevPos[1] === move.moveY) {
+
+                const alternativeExists = approachMoves.some(m =>
+                    m.pieceX === move.pieceX &&
+                    m.pieceY === move.pieceY &&
+                    (m.moveX !== move.moveX || m.moveY !== move.moveY)
+                );
+                if (!alternativeExists) {
+                 
+                    return true;
+                }
+                BotUI.UpdateActionStatus(`Skipping repeated move of piece at (${move.pieceX},${move.pieceY}) to (${move.moveX},${move.moveY})`);
                 return false;
             }
             return true;
         });
 
+
         if (filteredApproachMoves.length > 0) {
             filteredApproachMoves.sort((a, b) => {
+                if (a.bestPriority !== b.bestPriority)
+                    return a.bestPriority - b.bestPriority;
                 if (a.closestDist !== b.closestDist)
                     return a.closestDist - b.closestDist;
                 return piecePriority[a.pieceType] - piecePriority[b.pieceType];
@@ -735,6 +839,7 @@ const BotController = {
             await BotUtility.Sleep(25);
             return this.BotLoop();
         }
+
 
         const alliesPositions = [];
         for (let ax = 0; ax < boardW; ax++) {
@@ -803,25 +908,90 @@ const BotController = {
             }
         }
 
+        const kingIdle = !kingInDanger && kingMoves.length === 0;
+
+        if (kingIdle) {
+            const { x: kx, y: ky } = kingPos;
+            const allyPiecesInRealm = [];
+
+            for (let ax = 0; ax < boardW; ax++) {
+                for (let ay = 0; ay < boardH; ay++) {
+                    if (BotGameLogic.IsAlly(ax, ay) && BotGameLogic.GetPieceType(ax, ay) !== 6) {
+                        if (BotGameLogic.IsInsideKingRealm(ax, ay, kx, ky)) {
+                            allyPiecesInRealm.push({ x: ax, y: ay });
+                        }
+                    }
+                }
+            }
+
+            const threateningLines = [];
+            for (let ex = 0; ex < boardW; ex++) {
+                for (let ey = 0; ey < boardH; ey++) {
+                    if (BotGameLogic.IsEnemy(ex, ey)) {
+                        const path = BotController.GetPathBetween(ex, ey, kx, ky);
+ 
+                        if (path.length > 0 && path.every(([px, py]) => board[px][py] === 0)) {
+                            threateningLines.push({ fromX: ex, fromY: ey, path });
+                        }
+                    }
+                }
+            }
+
+            for (const line of threateningLines) {
+                for (const [bx, by] of line.path) {
+                    if (board[bx][by] === 0) { 
+
+                        const candidates = allyPiecesInRealm.filter(p => {
+                            const moves = BotGameLogic.GetLegalMoves(p.x, p.y);
+                            return moves.some(([mx, my]) => mx === bx && my === by);
+                        });
+
+                        candidates.sort((a, b) => {
+                            const defA = allyPiecesInRealm.filter(p => {
+                                if (p.x === a.x && p.y === a.y) return false;
+                                const moves = BotGameLogic.GetLegalMoves(p.x, p.y);
+                                return moves.some(([mx, my]) => mx === bx && my === by);
+                            }).length;
+                            const defB = allyPiecesInRealm.filter(p => {
+                                if (p.x === b.x && p.y === b.y) return false;
+                                const moves = BotGameLogic.GetLegalMoves(p.x, p.y);
+                                return moves.some(([mx, my]) => mx === bx && my === by);
+                            }).length;
+                            return defB - defA; 
+                        });
+
+                        if (candidates.length > 0) {
+                            const best = candidates[0];
+                            BotUI.UpdateActionStatus(`Interpose piece ${BotGameLogic.PieceTypeName(BotGameLogic.GetPieceType(best.x, best.y))} from (${best.x},${best.y}) to block line at (${bx},${by})`);
+                            BotController.SendMove(best.x, best.y, bx, by);
+                            await BotUtility.Sleep(25);
+                            return this.BotLoop();
+                        }
+                    }
+                }
+            }
+        }
+
         BotUI.UpdateActionStatus("No valid moves available, idling...");
         await BotUtility.Sleep(60);
         return this.BotLoop();
     },
 
+    IsEnemyPieceDefended(x, y) {
+        for (let ex = 0; ex < boardW; ex++) {
+            for (let ey = 0; ey < boardH; ey++) {
+                if (BotGameLogic.IsEnemy(ex, ey)) {
+                    if (ex === x && ey === y) continue;
+                    const moves = BotGameLogic.GetLegalMoves(ex, ey);
 
+                    if (moves.some(([mx, my]) => mx === x && my === y)) {
 
-    GetPathBetween(x1, y1, x2, y2) {
-        const path = [];
-        const dx = Math.sign(x2 - x1);
-        const dy = Math.sign(y2 - y1);
-        let cx = x1 + dx;
-        let cy = y1 + dy;
-        while (cx !== x2 || cy !== y2) {
-            path.push([cx, cy]);
-            if (cx !== x2) cx += dx;
-            if (cy !== y2) cy += dy;
+                        return true;
+                    }
+                }
+            }
         }
-        return path;
+        return false;
     },
 
     SendMove(fromX, fromY, toX, toY) {
