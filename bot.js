@@ -371,7 +371,67 @@ const BotController = {
         const kingInDanger = BotGameLogic.IsSquareDangerous(kx, ky);
 
         if (kingInDanger) {
+
+            const threateningEnemies = [];
+            for (let i = 0; i < boardW; i++) {
+                for (let j = 0; j < boardH; j++) {
+                    if (BotGameLogic.IsEnemy(i, j)) {
+                        const moves = BotGameLogic.GetLegalMoves(i, j);
+                        if (moves.some(([mx, my]) => mx === kx && my === ky)) {
+                            threateningEnemies.push({ x: i, y: j });
+                        }
+                    }
+                }
+            }
+
+            const captureMovesAgainstThreat = [];
+            for (let ax = 0; ax < boardW; ax++) {
+                for (let ay = 0; ay < boardH; ay++) {
+                    if (BotGameLogic.IsAlly(ax, ay) && BotGameLogic.GetPieceType(ax, ay) !== 6) {
+                        const moves = BotGameLogic.GetLegalMoves(ax, ay);
+                        for (const [mx, my] of moves) {
+                            if (threateningEnemies.some(e => e.x === mx && e.y === my)) {
+                                captureMovesAgainstThreat.push({ fromX: ax, fromY: ay, toX: mx, toY: my, pieceType: BotGameLogic.GetPieceType(ax, ay) });
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (captureMovesAgainstThreat.length > 0) {
+
+                captureMovesAgainstThreat.sort((a, b) => a.pieceType - b.pieceType);
+                const best = captureMovesAgainstThreat[0];
+                BotUI.UpdateActionStatus(`Ally ${BotGameLogic.PieceTypeName(best.pieceType)} at (${best.fromX},${best.fromY}) captures threat to king at (${best.toX},${best.toY})`);
+                BotController.SendMove(best.fromX, best.fromY, best.toX, best.toY);
+                await BotUtility.Sleep(25);
+                return this.BotLoop();
+            }
+
+
+   
             const safeMoves = kingMoves.filter(([x, y]) => !BotGameLogic.IsSquareDangerous(x, y));
+
+            // Trouver les captures possibles non défendues
+            const captureMoves = kingMoves.filter(([x, y]) => {
+                if (!BotGameLogic.IsEnemy(x, y)) return false;
+
+                let defended = false;
+                for (let ax = 0; ax < boardW; ax++) {
+                    for (let ay = 0; ay < boardH; ay++) {
+                        if (BotGameLogic.IsAlly(ax, ay) && !(ax === kx && ay === ky)) {
+                            const allyMoves = BotGameLogic.GetLegalMoves(ax, ay);
+                            if (allyMoves.some(([mx, my]) => mx === x && my === y)) {
+                                defended = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (defended) break;
+                }
+                return !defended;
+            });
+
             if (safeMoves.length > 0) {
                 const move = BotUtility.RandomElement(safeMoves);
                 if (move) {
@@ -379,6 +439,71 @@ const BotController = {
                     BotController.SendMove(kx, ky, move[0], move[1]);
                     await BotUtility.Sleep(25);
                     return this.BotLoop();
+                }
+            } else if (captureMoves.length > 0) {
+                const move = BotUtility.RandomElement(captureMoves);
+                if (move) {
+                    BotUI.UpdateActionStatus(`King captures undefended enemy at (${move[0]}, ${move[1]}) while in danger`);
+                    BotController.SendMove(kx, ky, move[0], move[1]);
+                    await BotUtility.Sleep(25);
+                    return this.BotLoop();
+                }
+            }
+
+            for (const threat of threateningEnemies) {
+                const path = this.GetPathBetween(threat.x, threat.y, kx, ky);
+
+                for (const [bx, by] of path) {
+                    if (board[bx][by] === 0) {
+                        const candidateInterpositions = [];
+
+                        for (let ax = 0; ax < boardW; ax++) {
+                            for (let ay = 0; ay < boardH; ay++) {
+                                if (BotGameLogic.IsAlly(ax, ay) && BotGameLogic.GetPieceType(ax, ay) !== 6) {
+                                    const moves = BotGameLogic.GetLegalMoves(ax, ay);
+                                    if (moves.some(([mx, my]) => mx === bx && my === by)) {
+   
+                                        let defended = false;
+                                        for (let dx = 0; dx < boardW; dx++) {
+                                            for (let dy = 0; dy < boardH; dy++) {
+                                                if ((dx !== ax || dy !== ay) && BotGameLogic.IsAlly(dx, dy)) {
+                                                    const allyMoves = BotGameLogic.GetLegalMoves(dx, dy);
+                                                    if (allyMoves.some(([amx, amy]) => amx === bx && amy === by)) {
+                                                        defended = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if (defended) break;
+                                        }
+
+                                        candidateInterpositions.push({
+                                            fromX: ax,
+                                            fromY: ay,
+                                            toX: bx,
+                                            toY: by,
+                                            pieceType: BotGameLogic.GetPieceType(ax, ay),
+                                            defended,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
+                        if (candidateInterpositions.length > 0) {
+                            candidateInterpositions.sort((a, b) => {
+                                if (a.defended === b.defended) return 0;
+                                if (a.defended) return -1;
+                                return 1;
+                            });
+
+                            const best = candidateInterpositions[0];
+                            BotUI.UpdateActionStatus(`Interpose piece ${BotGameLogic.PieceTypeName(best.pieceType)} from (${best.fromX},${best.fromY}) to block threat at (${best.toX},${best.toY}), defended: ${best.defended}`);
+                            BotController.SendMove(best.fromX, best.fromY, best.toX, best.toY);
+                            await BotUtility.Sleep(25);
+                            return this.BotLoop();
+                        }
+                    }
                 }
             }
         }
@@ -409,7 +534,7 @@ const BotController = {
             for (let y = 0; y < boardH; y++) {
                 if (BotGameLogic.IsAlly(x, y)) {
                     const pieceType = BotGameLogic.GetPieceType(x, y);
-                    if (pieceType === 6) continue; 
+                    if (pieceType === 6) continue;
 
                     if (!BotGameLogic.IsInsideKingRealm(x, y, kx, ky) && BotGameLogic.IsSquareDangerous(x, y)) {
                         const legalMoves = BotGameLogic.GetLegalMoves(x, y);
@@ -469,95 +594,10 @@ const BotController = {
             }
         }
 
-        if (capturableEnemies.length > 0) {
-            const captureMovesGlobal = [];
-            const piecePriority = { 5: 1, 4: 2, 3: 3, 2: 4, 1: 5 };
-            for (let x = 0; x < boardW; x++) {
-                for (let y = 0; y < boardH; y++) {
-                    if (!BotGameLogic.IsAlly(x, y)) continue;
-                    const pieceType = BotGameLogic.GetPieceType(x, y);
-                    if (pieceType === 6) continue; 
-                    const moves = BotGameLogic.GetLegalMoves(x, y);
-                    for (const [mx, my] of moves) {
-                        if (capturableEnemies.some(e => e.x === mx && e.y === my)) {
-                            captureMovesGlobal.push({
-                                pieceX: x,
-                                pieceY: y,
-                                moveX: mx,
-                                moveY: my,
-                                pieceType,
-                                targetX: mx,
-                                targetY: my,
-                            });
-                        }
-                    }
-                }
-            }
-
-            if (captureMovesGlobal.length > 0) {
-                captureMovesGlobal.sort((a, b) => {
-                    if (piecePriority[a.pieceType] !== piecePriority[b.pieceType])
-                        return piecePriority[a.pieceType] - piecePriority[b.pieceType];
-                    return BotUtility.MaxDistance(a.pieceX, a.pieceY, a.moveX, a.moveY) - BotUtility.MaxDistance(b.pieceX, b.pieceY, b.moveX, b.moveY);
-                });
-                const best = captureMovesGlobal[0];
-                BotUI.UpdateActionStatus(`Ally ${BotGameLogic.PieceTypeName(best.pieceType)} at (${best.pieceX},${best.pieceY}) captures enemy outside kingdom at (${best.moveX},${best.moveY})`);
-                BotController.SendMove(best.pieceX, best.pieceY, best.moveX, best.moveY);
-                await BotUtility.Sleep(25);
-                return this.BotLoop();
-            }
-        }
-
-
-        for (let x = 0; x < boardW; x++) {
-            for (let y = 0; y < boardH; y++) {
-                if (BotGameLogic.IsAlly(x, y) && BotGameLogic.IsInsideKingRealm(x, y, kx, ky)) {
-                    if (BotGameLogic.IsSquareDangerous(x, y)) {
-                        const legalMoves = BotGameLogic.GetLegalMoves(x, y);
-                        const safeMoves = legalMoves.filter(([tx, ty]) => {
-                            if (!BotGameLogic.IsInsideKingRealm(tx, ty, kx, ky)) return false;
-                            if (BotGameLogic.IsSquareDangerous(tx, ty)) return false;
-
- 
-                            const pieceType = BotGameLogic.GetPieceType(x, y);
-                            const originalPiece = board[tx][ty];
-
-                            board[tx][ty] = pieceType;
-                            board[x][y] = 0;
-
-  
-                            const kingPosAfterMove = BotGameLogic.FindKingPosition();
-                            const kingSafeAfterMove = kingPosAfterMove ? !BotGameLogic.IsSquareDangerous(kingPosAfterMove.x, kingPosAfterMove.y) : false;
-
-
-                            board[x][y] = pieceType;
-                            board[tx][ty] = originalPiece;
-
-                            return kingSafeAfterMove;
-                        });
-
-                        if (safeMoves.length > 0) {
-                            const move = BotUtility.RandomElement(safeMoves);
-                            if (move) {
-                                BotUI.UpdateActionStatus(`Ally piece at (${x}, ${y}) moves to safe square (${move[0]}, ${move[1]})`);
-                                BotController.SendMove(x, y, move[0], move[1]);
-                                await BotUtility.Sleep(25);
-                                return this.BotLoop();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-
-        const king = BotGameLogic.FindKingPosition();
-        if (!king) return;
-
         const targetsEnemy = [];
         for (let x = 0; x < boardW; x++) {
             for (let y = 0; y < boardH; y++) {
-                if (BotGameLogic.IsEnemy(x, y) && BotUtility.MaxDistance(x, y, king.x, king.y) <= range) {
+                if (BotGameLogic.IsEnemy(x, y) && BotUtility.MaxDistance(x, y, kingPos.x, kingPos.y) <= range) {
                     targetsEnemy.push([x, y]);
                 }
             }
@@ -568,7 +608,7 @@ const BotController = {
         if (targets.length === 0) {
             for (let x = 0; x < boardW; x++) {
                 for (let y = 0; y < boardH; y++) {
-                    if (BotGameLogic.IsNeutralPiece(x, y) && BotUtility.MaxDistance(x, y, king.x, king.y) <= range) {
+                    if (BotGameLogic.IsNeutralPiece(x, y) && BotUtility.MaxDistance(x, y, kingPos.x, kingPos.y) <= range) {
                         targets.push([x, y]);
                     }
                 }
@@ -586,16 +626,33 @@ const BotController = {
 
         const piecePriority = { 5: 1, 4: 2, 3: 3, 2: 4, 1: 5, 6: 6 };
 
+        function isLightSquare(x, y) {
+            return (x + y) % 2 === 0;
+        }
+
+        function neutralMoveApproachesEnemy(mx, my) {
+            for (const [tx, ty] of targets) {
+                if (BotUtility.MaxDistance(mx, my, tx, ty) <= range && BotGameLogic.IsEnemy(tx, ty)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         for (let x = 0; x < boardW; x++) {
             for (let y = 0; y < boardH; y++) {
                 if (!BotGameLogic.IsAlly(x, y)) continue;
-                if (BotUtility.MaxDistance(x, y, king.x, king.y) > range) continue;
+                if (BotUtility.MaxDistance(x, y, kingPos.x, kingPos.y) > range) continue;
 
                 const pieceType = BotGameLogic.GetPieceType(x, y);
-                if (pieceType === 6) continue; 
+                if (pieceType === 6) continue;
+
                 const moves = BotGameLogic.GetLegalMoves(x, y);
 
                 for (const [mx, my] of moves) {
+
+                    if (pieceType === 3 && isLightSquare(x, y) !== isLightSquare(mx, my)) continue;
+
                     if (targets.some(([tx, ty]) => tx === mx && ty === my)) {
                         captureMoves.push({
                             pieceX: x,
@@ -608,20 +665,33 @@ const BotController = {
                         });
                     } else {
                         const targetPiece = BotGameLogic.GetPieceType(mx, my);
+
                         if (targetPiece === 0) {
-                            let closestDist = Infinity;
-                            for (const [tx, ty] of targets) {
-                                const dist = BotUtility.MaxDistance(mx, my, tx, ty);
-                                if (dist < closestDist) closestDist = dist;
+                            if (neutralMoveApproachesEnemy(mx, my)) {
+                                captureMoves.push({
+                                    pieceX: x,
+                                    pieceY: y,
+                                    moveX: mx,
+                                    moveY: my,
+                                    pieceType,
+                                    targetX: mx,
+                                    targetY: my,
+                                });
+                            } else {
+                                let closestDist = Infinity;
+                                for (const [tx, ty] of targets) {
+                                    const dist = BotUtility.MaxDistance(mx, my, tx, ty);
+                                    if (dist < closestDist) closestDist = dist;
+                                }
+                                approachMoves.push({
+                                    pieceX: x,
+                                    pieceY: y,
+                                    moveX: mx,
+                                    moveY: my,
+                                    pieceType,
+                                    closestDist,
+                                });
                             }
-                            approachMoves.push({
-                                pieceX: x,
-                                pieceY: y,
-                                moveX: mx,
-                                moveY: my,
-                                pieceType,
-                                closestDist,
-                            });
                         }
                     }
                 }
@@ -666,9 +736,92 @@ const BotController = {
             return this.BotLoop();
         }
 
+        const alliesPositions = [];
+        for (let ax = 0; ax < boardW; ax++) {
+            for (let ay = 0; ay < boardH; ay++) {
+                if (BotGameLogic.IsAlly(ax, ay)) {
+                    alliesPositions.push({ x: ax, y: ay });
+                }
+            }
+        }
+
+        for (const allyPos of alliesPositions) {
+            const allyKingdomSize = Math.floor(BotGameLogic.KingRealmSize);
+
+            const intruders = [];
+            let enemyKings = [];
+
+            for (let ex = 0; ex < boardW; ex++) {
+                for (let ey = 0; ey < boardH; ey++) {
+                    if (BotGameLogic.IsEnemy(ex, ey)) {
+                        const dist = BotUtility.MaxDistance(ex, ey, allyPos.x, allyPos.y);
+                        if (dist <= allyKingdomSize) {
+                            const pieceType = BotGameLogic.GetPieceType(ex, ey);
+                            if (pieceType === 6) enemyKings.push({ x: ex, y: ey });
+                            else intruders.push({ x: ex, y: ey });
+                        }
+                    }
+                }
+            }
+
+            if (enemyKings.length > 0) {
+                for (let px = 0; px < boardW; px++) {
+                    for (let py = 0; py < boardH; py++) {
+                        if (!BotGameLogic.IsAlly(px, py)) continue;
+                        const pieceType = BotGameLogic.GetPieceType(px, py);
+                        if (pieceType === 6) continue;
+                        const moves = BotGameLogic.GetLegalMoves(px, py);
+                        for (const [mx, my] of moves) {
+                            if (enemyKings.some(k => k.x === mx && k.y === my)) {
+                                BotUI.UpdateActionStatus(`Defending ally at (${allyPos.x},${allyPos.y}): capturing enemy King at (${mx},${my})`);
+                                BotController.SendMove(px, py, mx, my);
+                                await BotUtility.Sleep(25);
+                                return this.BotLoop();
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (intruders.length > 0) {
+                for (let px = 0; px < boardW; px++) {
+                    for (let py = 0; py < boardH; py++) {
+                        if (!BotGameLogic.IsAlly(px, py)) continue;
+                        const pieceType = BotGameLogic.GetPieceType(px, py);
+                        if (pieceType === 6) continue;
+                        const moves = BotGameLogic.GetLegalMoves(px, py);
+                        for (const [mx, my] of moves) {
+                            if (intruders.some(i => i.x === mx && i.y === my)) {
+                                BotUI.UpdateActionStatus(`Defending ally at (${allyPos.x},${allyPos.y}): capturing intruder at (${mx},${my})`);
+                                BotController.SendMove(px, py, mx, my);
+                                await BotUtility.Sleep(25);
+                                return this.BotLoop();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         BotUI.UpdateActionStatus("No valid moves available, idling...");
         await BotUtility.Sleep(60);
         return this.BotLoop();
+    },
+
+
+
+    GetPathBetween(x1, y1, x2, y2) {
+        const path = [];
+        const dx = Math.sign(x2 - x1);
+        const dy = Math.sign(y2 - y1);
+        let cx = x1 + dx;
+        let cy = y1 + dy;
+        while (cx !== x2 || cy !== y2) {
+            path.push([cx, cy]);
+            if (cx !== x2) cx += dx;
+            if (cy !== y2) cy += dy;
+        }
+        return path;
     },
 
     SendMove(fromX, fromY, toX, toY) {
@@ -681,6 +834,7 @@ const BotController = {
         this.BotLoop();
         setInterval(() => BotUI.CreateAllySelectionMenu(), 3000);
     }
+
 };
 
 BotController.Initialize();
